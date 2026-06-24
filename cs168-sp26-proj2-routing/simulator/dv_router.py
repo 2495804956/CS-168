@@ -59,6 +59,7 @@ class DVRouter(DVRouterBase):
         self.table.owner = self
 
         ##### Begin Stage 10A #####
+        self.history = {}
 
         ##### End Stage 10A #####
 
@@ -117,7 +118,9 @@ class DVRouter(DVRouterBase):
         """
         
         ##### Begin Stages 3, 6, 7, 8, 10 #####
-        for port in self.ports.get_all_ports():
+        ports_to_send = [single_port] if single_port else self.ports.get_all_ports()
+        for port in ports_to_send:
+            port_history = self.history.setdefault(port,{})
             for dst, entry in self.table.items():
                 latency = entry.latency
 
@@ -133,7 +136,11 @@ class DVRouter(DVRouterBase):
                 if self.POISON_REVERSE and entry.port == port:
                     latency = INFINITY
 
+                if not force and port_history.get(dst) == latency:
+                    continue
+
                 self.send_route(port, dst, latency)
+                port_history[dst] = latency
 
 
         ##### End Stages 3, 6, 7, 8, 10 #####
@@ -180,6 +187,7 @@ class DVRouter(DVRouterBase):
         
         if update:
             self.table[route_dst] = TableEntry(dst=route_dst, port=port, latency=new_latency, expire_time=api.current_time()+self.ROUTE_TTL)
+            self.send_routes(force=False)
         
 
 
@@ -196,6 +204,8 @@ class DVRouter(DVRouterBase):
         self.ports.add_port(port, latency)
 
         ##### Begin Stage 10B #####
+        if self.SEND_ON_LINK_UP:
+            self.send_routes(single_port=port)
 
         ##### End Stage 10B #####
 
@@ -207,9 +217,23 @@ class DVRouter(DVRouterBase):
         :returns: nothing.
         """
         self.ports.remove_port(port)
+        self.history.pop(port, None)
 
         ##### Begin Stage 10B #####
+        # if self.SEND_ON_LINK_DOWN is True,replace all routes using that port with poison and advertise all neighbors.or drop the route.
+        changed = False
+        for dst in list(self.table.keys()):
+            if self.table[dst].port == port:
+                if self.POISON_ON_LINK_DOWN:
+                    self.table[dst] = TableEntry(dst=dst, port=port, latency=INFINITY, expire_time=api.current_time()+self.ROUTE_TTL)
 
+                else:
+                    self.table.pop(dst)
+       
+            changed = True
+
+        if changed:
+            self.send_routes(force=False)
         ##### End Stage 10B #####
 
     # Feel free to add any helper methods!
